@@ -1,0 +1,445 @@
+name: Build Harpoon Extended
+
+on:
+push:
+branches:
+- master
+pull_request:
+workflow_dispatch:
+
+permissions:
+contents: read
+
+jobs:
+build:
+name: Build Harpoon Extended
+runs-on: windows-latest
+
+steps:
+  # ------------------------------------------------------------
+  # Checkout
+  # ------------------------------------------------------------
+  - name: Checkout repository
+    uses: actions/checkout@v4
+
+  # ------------------------------------------------------------
+  # MSBuild / NuGet
+  # ------------------------------------------------------------
+  - name: Setup MSBuild
+    uses: microsoft/setup-msbuild@v2
+
+  - name: Setup NuGet
+    uses: NuGet/setup-nuget@v2
+
+  # ------------------------------------------------------------
+  # Install SteamCMD
+  # ------------------------------------------------------------
+  - name: Install SteamCMD
+    shell: pwsh
+    run: |
+      $steamCmdDir = "$env:RUNNER_TEMP\steamcmd"
+      New-Item -ItemType Directory -Force -Path $steamCmdDir | Out-Null
+
+      $url = "https://steamcdn-a.akamaihd.net/client/installer/steamcmd.zip"
+      $zip = "$env:RUNNER_TEMP\steamcmd.zip"
+
+      Write-Host "Downloading SteamCMD..."
+      Invoke-WebRequest -Uri $url -OutFile $zip
+
+      Write-Host "Extracting SteamCMD..."
+      Expand-Archive -Path $zip -DestinationPath $steamCmdDir -Force
+
+      Write-Host "SteamCMD installed at:"
+      Write-Host $steamCmdDir
+
+  # ------------------------------------------------------------
+  # Download the current Valheim Dedicated Server
+  #
+  # App ID 896660 = Valheim Dedicated Server
+  # ------------------------------------------------------------
+  - name: Download Valheim Dedicated Server
+    shell: pwsh
+    run: |
+      $steamCmd = "$env:RUNNER_TEMP\steamcmd\steamcmd.exe"
+      $valheimDir = "$env:RUNNER_TEMP\valheim"
+
+      New-Item -ItemType Directory -Force -Path $valheimDir | Out-Null
+
+      Write-Host "Downloading Valheim Dedicated Server..."
+
+      & $steamCmd `
+        +@NoPromptForPassword 1 `
+        +force_install_dir "$valheimDir" `
+        +login anonymous `
+        +app_update 896660 validate `
+        +quit
+
+      if ($LASTEXITCODE -ne 0) {
+        throw "SteamCMD failed with exit code $LASTEXITCODE"
+      }
+
+      if (-not (Test-Path "$valheimDir\valheim_Data\Managed")) {
+        throw "Valheim Managed directory was not found."
+      }
+
+      Write-Host "Valheim downloaded successfully."
+
+  # ------------------------------------------------------------
+  # Download BepInExPack Valheim
+  # ------------------------------------------------------------
+  - name: Download BepInExPack Valheim
+    shell: pwsh
+    run: |
+      $url = "https://thunderstore.io/package/download/denikson/BepInExPack_Valheim/"
+      $zip = "$env:RUNNER_TEMP\bepinex.zip"
+      $extract = "$env:RUNNER_TEMP\bepinex"
+
+      Write-Host "Downloading BepInExPack Valheim..."
+      Invoke-WebRequest -Uri $url -OutFile $zip
+
+      Write-Host "Extracting BepInExPack..."
+      Expand-Archive -Path $zip -DestinationPath $extract -Force
+
+      $bepinexRoot = Get-ChildItem `
+        -Path $extract `
+        -Directory `
+        -Recurse `
+        -Filter "BepInExPack_Valheim" |
+        Select-Object -First 1
+
+      if (-not $bepinexRoot) {
+        throw "Could not find BepInExPack_Valheim in downloaded archive."
+      }
+
+      "BEPINEX_ROOT=$($bepinexRoot.FullName)" | Out-File `
+        -FilePath $env:GITHUB_ENV `
+        -Append
+
+      Write-Host "BepInEx root: $($bepinexRoot.FullName)"
+
+  # ------------------------------------------------------------
+  # Prepare the exact Assemblies layout expected by the project
+  # ------------------------------------------------------------
+  - name: Prepare build assemblies
+    shell: pwsh
+    run: |
+      $repo = $env:GITHUB_WORKSPACE
+      $assemblies = Join-Path $repo "..\Assemblies"
+
+      $stable = Join-Path $assemblies "stable"
+      $harmony = Join-Path $assemblies "Harmony"
+      $managers = Join-Path $assemblies "Managers"
+
+      New-Item -ItemType Directory -Force -Path $stable | Out-Null
+      New-Item -ItemType Directory -Force -Path $harmony | Out-Null
+      New-Item -ItemType Directory -Force -Path $managers | Out-Null
+
+      $valheim = "$env:RUNNER_TEMP\valheim"
+      $managed = "$valheim\valheim_Data\Managed"
+
+      Write-Host "Valheim Managed directory:"
+      Write-Host $managed
+
+      # --------------------------------------------------------
+      # BepInEx
+      # --------------------------------------------------------
+      Copy-Item `
+        "$env:BEPINEX_ROOT\BepInEx\core\BepInEx.dll" `
+        "$harmony\BepInEx.dll" `
+        -Force
+
+      # BepInEx's HarmonyX assembly is normally named
+      # 0Harmony.dll in the BepInEx core directory.
+      $harmonyDll = Get-ChildItem `
+        "$env:BEPINEX_ROOT\BepInEx\core" `
+        -Filter "0Harmony.dll" `
+        -File `
+        -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+
+      if (-not $harmonyDll) {
+        throw "Could not find 0Harmony.dll in BepInExPack."
+      }
+
+      Copy-Item `
+        $harmonyDll.FullName `
+        "$harmony\0Harmony.dll" `
+        -Force
+
+      # --------------------------------------------------------
+      # Unity / Valheim assemblies
+      # --------------------------------------------------------
+      $requiredUnity = @(
+        "UnityEngine.dll",
+        "UnityEngine.AnimationModule.dll",
+        "UnityEngine.CoreModule.dll",
+        "UnityEngine.PhysicsModule.dll"
+      )
+
+      foreach ($dll in $requiredUnity) {
+        $source = Join-Path $managed $dll
+
+        if (-not (Test-Path $source)) {
+          throw "Required Unity assembly not found: $source"
+        }
+
+        Copy-Item $source $stable -Force
+      }
+
+      # --------------------------------------------------------
+      # Copy Valheim assembly inputs for publicization
+      # --------------------------------------------------------
+      $publicizerInput = "$env:RUNNER_TEMP\publicizer-input"
+
+      New-Item `
+        -ItemType Directory `
+        -Force `
+        -Path $publicizerInput |
+        Out-Null
+
+      $valheimAssemblies = Get-ChildItem `
+        $managed `
+        -Filter "assembly_*.dll" `
+        -File
+
+      if ($valheimAssemblies.Count -eq 0) {
+        throw "No assembly_*.dll files were found in Valheim Managed."
+      }
+
+      foreach ($dll in $valheimAssemblies) {
+        Copy-Item `
+          $dll.FullName `
+          $publicizerInput `
+          -Force
+      }
+
+      # Export paths for later steps.
+      "ASSEMBLIES_PATH=$assemblies" | Out-File `
+        -FilePath $env:GITHUB_ENV `
+        -Append
+
+      "VALHEIM_MANAGED=$managed" | Out-File `
+        -FilePath $env:GITHUB_ENV `
+        -Append
+
+      "PUBLICIZER_INPUT=$publicizerInput" | Out-File `
+        -FilePath $env:GITHUB_ENV `
+        -Append
+
+      Write-Host ""
+      Write-Host "Assemblies directory:"
+      Get-ChildItem $assemblies -Recurse | Select-Object FullName
+
+  # ------------------------------------------------------------
+  # Download AssemblyPublicizer
+  # ------------------------------------------------------------
+  - name: Download AssemblyPublicizer
+    shell: pwsh
+    run: |
+      $release = Invoke-RestMethod `
+        -Uri "https://api.github.com/repos/CabbageCrow/AssemblyPublicizer/releases/latest" `
+        -Headers @{
+          "User-Agent" = "GitHubActions-HarpoonExtended"
+        }
+
+      $asset = $release.assets |
+        Where-Object {
+          $_.name -match '\.zip$'
+        } |
+        Select-Object -First 1
+
+      if (-not $asset) {
+        throw "Could not find AssemblyPublicizer ZIP in latest release."
+      }
+
+      $zip = "$env:RUNNER_TEMP\AssemblyPublicizer.zip"
+      $dir = "$env:RUNNER_TEMP\AssemblyPublicizer"
+
+      Write-Host "AssemblyPublicizer version: $($release.tag_name)"
+      Write-Host "Downloading: $($asset.browser_download_url)"
+
+      Invoke-WebRequest `
+        -Uri $asset.browser_download_url `
+        -OutFile $zip
+
+      Expand-Archive `
+        -Path $zip `
+        -DestinationPath $dir `
+        -Force
+
+      $exe = Get-ChildItem `
+        $dir `
+        -Filter "AssemblyPublicizer.exe" `
+        -Recurse `
+        -File |
+        Select-Object -First 1
+
+      if (-not $exe) {
+        throw "AssemblyPublicizer.exe was not found after extraction."
+      }
+
+      "PUBLICIZER_EXE=$($exe.FullName)" | Out-File `
+        -FilePath $env:GITHUB_ENV `
+        -Append
+
+      Write-Host "AssemblyPublicizer: $($exe.FullName)"
+
+  # ------------------------------------------------------------
+  # Publicize Valheim assemblies
+  # ------------------------------------------------------------
+  - name: Publicize Valheim assemblies
+    shell: pwsh
+    run: |
+      $publicized = "$env:ASSEMBLIES_PATH\stable\publicized_assemblies"
+
+      New-Item `
+        -ItemType Directory `
+        -Force `
+        -Path $publicized |
+        Out-Null
+
+      $assemblies = Get-ChildItem `
+        $env:PUBLICIZER_INPUT `
+        -Filter "assembly_*.dll" `
+        -File
+
+      foreach ($assembly in $assemblies) {
+        $output = Join-Path `
+          $publicized `
+          ($assembly.BaseName + "_publicized.dll")
+
+        Write-Host ""
+        Write-Host "Publicizing $($assembly.Name)"
+        Write-Host " -> $output"
+
+        & $env:PUBLICIZER_EXE `
+          -i "$($assembly.FullName)" `
+          -o "$output" `
+          -e
+
+        if ($LASTEXITCODE -ne 0) {
+          throw "AssemblyPublicizer failed for $($assembly.Name)"
+        }
+
+        if (-not (Test-Path $output)) {
+          throw "Publicized assembly was not created: $output"
+        }
+      }
+
+      Write-Host ""
+      Write-Host "Publicized assemblies:"
+      Get-ChildItem $publicized | Select-Object Name, Length
+
+  # ------------------------------------------------------------
+  # Verify the exact references required by HarpoonExtended.csproj
+  # ------------------------------------------------------------
+  - name: Verify build references
+    shell: pwsh
+    run: |
+      $required = @(
+        "$env:ASSEMBLIES_PATH\Harmony\BepInEx.dll",
+        "$env:ASSEMBLIES_PATH\Harmony\0Harmony.dll",
+        "$env:ASSEMBLIES_PATH\stable\UnityEngine.dll",
+        "$env:ASSEMBLIES_PATH\stable\UnityEngine.AnimationModule.dll",
+        "$env:ASSEMBLIES_PATH\stable\UnityEngine.CoreModule.dll",
+        "$env:ASSEMBLIES_PATH\stable\UnityEngine.PhysicsModule.dll",
+        "$env:ASSEMBLIES_PATH\stable\publicized_assemblies\assembly_valheim_publicized.dll",
+        "$env:ASSEMBLIES_PATH\stable\publicized_assemblies\assembly_guiutils_publicized.dll",
+        "$env:ASSEMBLIES_PATH\stable\publicized_assemblies\assembly_utils_publicized.dll"
+      )
+
+      $missing = @()
+
+      foreach ($file in $required) {
+        if (-not (Test-Path $file)) {
+          $missing += $file
+        }
+      }
+
+      if ($missing.Count -gt 0) {
+        Write-Host "Missing required assemblies:"
+        $missing | ForEach-Object {
+          Write-Host "  $_"
+        }
+
+        throw "One or more required build assemblies are missing."
+      }
+
+      Write-Host "All required build assemblies are present."
+
+  # ------------------------------------------------------------
+  # Build
+  # ------------------------------------------------------------
+  - name: Build Release
+    shell: pwsh
+    run: |
+      nuget restore .\HarpoonExtended.sln
+
+      msbuild .\HarpoonExtended.sln `
+        /m `
+        /p:Configuration=Release `
+        /p:Platform=AnyCPU `
+        /verbosity:minimal
+
+      if ($LASTEXITCODE -ne 0) {
+        throw "MSBuild failed with exit code $LASTEXITCODE"
+      }
+
+  # ------------------------------------------------------------
+  # Verify resulting DLL
+  # ------------------------------------------------------------
+  - name: Verify build output
+    shell: pwsh
+    run: |
+      $dll = "$env:GITHUB_WORKSPACE\bin\Release\HarpoonExtended.dll"
+
+      if (-not (Test-Path $dll)) {
+        throw "HarpoonExtended.dll was not produced at $dll"
+      }
+
+      $file = Get-Item $dll
+
+      Write-Host "Build successful."
+      Write-Host "DLL: $($file.FullName)"
+      Write-Host "Size: $($file.Length) bytes"
+
+  # ------------------------------------------------------------
+  # Show generated package
+  # ------------------------------------------------------------
+  - name: Verify package
+    shell: pwsh
+    run: |
+      $package = "$env:GITHUB_WORKSPACE\package\thunderstore\HarpoonExtended"
+
+      if (Test-Path $package) {
+        Write-Host "Generated package:"
+        Get-ChildItem $package -Recurse |
+          Select-Object FullName, Length
+      }
+      else {
+        Write-Host "No Thunderstore package directory was generated."
+        Write-Host "The DLL build itself succeeded."
+      }
+
+  # ------------------------------------------------------------
+  # Upload raw DLL
+  # ------------------------------------------------------------
+  - name: Upload DLL artifact
+    uses: actions/upload-artifact@v4
+    with:
+      name: HarpoonExtended-DLL
+      path: |
+        bin/Release/HarpoonExtended.dll
+        bin/Release/HarpoonExtended.pdb
+      if-no-files-found: error
+
+  # ------------------------------------------------------------
+  # Upload ready-to-install package
+  # ------------------------------------------------------------
+  - name: Upload Thunderstore package
+    uses: actions/upload-artifact@v4
+    with:
+      name: HarpoonExtended-Package
+      path: |
+        package/thunderstore/HarpoonExtended.zip
+      if-no-files-found: warn
