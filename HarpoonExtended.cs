@@ -2,14 +2,12 @@ using System;
 using System.Collections.Generic;
 using BepInEx;
 using BepInEx.Configuration;
-using ConditionalConfigSync;
 using HarmonyLib;
 using UnityEngine;
 
 namespace HarpoonExtended
 {
     [BepInPlugin(pluginID, pluginName, pluginVersion)]
-    [BepInDependency("_shudnal.ConditionalConfigSync", "1.0.5")]
     public partial class HarpoonExtended : BaseUnityPlugin
     {
         internal const string pluginID = "shudnal.HarpoonExtended";
@@ -17,13 +15,6 @@ namespace HarpoonExtended
         internal const string pluginVersion = "1.2.0";
 
         private readonly Harmony harmony = new Harmony(pluginID);
-        internal static readonly ConfigSync configSync = new ConfigSync(pluginID)
-        {
-            DisplayName = pluginName,
-            CurrentVersion = pluginVersion,
-            MinimumRequiredVersion = pluginVersion,
-            ModRequired = true
-        };
 
         public static ConfigEntry<bool> configLocked;
         public static ConfigEntry<bool> loggingEnabled;
@@ -124,7 +115,6 @@ namespace HarpoonExtended
         {
             instance = this;
             ConfigInit();
-            configSync.AddLockingConfigEntry(configLocked);
             harmony.PatchAll();
             Game.isModded = true;
         }
@@ -218,16 +208,29 @@ namespace HarpoonExtended
             maximumVelocity = config("8 - Debug", "Maximum velocity", 10f, "Maximum velocity imparted to player rigidbody by harpoon pulling");
         }
 
-        private ConfigEntry<T> config<T>(string group, string name, T defaultValue, ConfigDescription description, bool synchronizedSetting = true)
-        {
-            ConfigEntry<T> entry = Config.Bind(group, name, defaultValue, description);
-            configSync.AddConfigEntry(entry, synchronizedSetting ? ConfigSyncMode.AlwaysServerControlled : ConfigSyncMode.AlwaysClientControlled);
-            return entry;
-        }
+       private ConfigEntry<T> config<T>(
+    string group,
+    string name,
+    T defaultValue,
+    ConfigDescription description,
+    bool synchronizedSetting = true)
+{
+    return Config.Bind(group, name, defaultValue, description);
+}
 
-        private ConfigEntry<T> config<T>(string group, string name, T defaultValue, string description, bool synchronizedSetting = true)
-            => config(group, name, defaultValue, new ConfigDescription(description), synchronizedSetting);
-
+private ConfigEntry<T> config<T>(
+    string group,
+    string name,
+    T defaultValue,
+    string description,
+    bool synchronizedSetting = true)
+    => config(
+        group,
+        name,
+        defaultValue,
+        new ConfigDescription(description),
+        synchronizedSetting);
+        
         private static bool KeyPressStopHarpoon() => shortcutStop.Value.IsDown() || ZInput.GetButton("Block") || ZInput.GetButton("JoyBlock");
         private static bool KeyPressPullHarpoon() => ZInput.GetButton("Use") || ZInput.GetButton("JoyUse") || shortcutPull.Value.IsPressed();
         private static bool KeyPressReleaseHarpoon() => (KeyPressPullHarpoon() && (ZInput.GetButton("Crouch") || ZInput.GetButton("JoyCrouch"))) || shortcutRelease.Value.IsPressed();
