@@ -16,7 +16,6 @@
     <AssembliesPath Condition="'$(AssembliesPath)' == ''">$(MSBuildProjectDirectory)\..\Assemblies</AssembliesPath>
     <GameAssembliesPath Condition="'$(GameAssembliesPath)' == ''">$(AssembliesPath)\stable</GameAssembliesPath>
     <PublicizedAssembliesPath Condition="'$(PublicizedAssembliesPath)' == ''">$(GameAssembliesPath)\publicized_assemblies</PublicizedAssembliesPath>
-    <ConditionalConfigSyncPath Condition="'$(ConditionalConfigSyncPath)' == ''">$(AssembliesPath)\Managers\ConditionalConfigSync.dll</ConditionalConfigSyncPath>
     <ReferencePath>$(ReferencePath);$(PublicizedAssembliesPath);$(GameAssembliesPath);$(AssembliesPath)\Harmony;$(AssembliesPath)\Managers</ReferencePath>
   </PropertyGroup>
   <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Debug|AnyCPU' ">
